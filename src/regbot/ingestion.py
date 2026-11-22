@@ -407,99 +407,109 @@ def ingest_policy_file(
     chroma_dir = _chroma_path(store_dir)
 
     client = chromadb.PersistentClient(path=chroma_dir, settings=chromadb_settings())
-    if reset:
-        try:
-            client.delete_collection(collection_name)
-        except Exception:
-            pass
-        if os.path.isfile(_manifest_path(store_dir)):
-            os.remove(_manifest_path(store_dir))
+    try:
+        if reset:
+            try:
+                client.delete_collection(collection_name)
+            except Exception:
+                pass
+            if os.path.isfile(_manifest_path(store_dir)):
+                os.remove(_manifest_path(store_dir))
 
-    existing = read_manifest(store_dir) if not reset else []
-    source_tag = _stable_source_id(file_path)
-    base_category = category or os.path.splitext(os.path.basename(file_path))[0]
-    jurisdiction_tag = (
-        normalize_jurisdiction(jurisdiction) if jurisdiction and str(jurisdiction).strip() else None
-    )
-
-    new_records: List[Dict[str, Any]] = []
-    ext = os.path.splitext(file_path)[1].lower()
-    pages = load_document_pages(file_path)
-    chunk_idx = 0
-    for page_text, page_num in pages:
-        headings = detect_headings(page_text)
-        for piece, offset in chunk_by_sections(page_text):
-            if not has_citable_content(piece):
-                continue
-            cid = f"{source_tag}_p{page_num}_c{chunk_idx}"
-            chunk_idx += 1
-            meta: Dict[str, Any] = {
-                "source": os.path.basename(file_path),
-                "page": int(page_num),
-                "category": base_category,
-            }
-            # Absent when the source has no detectable heading structure (e.g. PDF text
-            # extraction flattens layout). Omitted rather than guessed. A chunk that
-            # straddles a boundary lists every section it touches, joined by "; ",
-            # rather than claiming only the one it started in.
-            spanned = sections_for_span(headings, offset, offset + len(piece))
-            if spanned:
-                meta["section"] = "; ".join(spanned)
-            if jurisdiction_tag:
-                meta["jurisdiction"] = jurisdiction_tag
-            if document_id and str(document_id).strip():
-                meta["document_id"] = str(document_id).strip()
-            if framework and str(framework).strip():
-                meta["framework"] = str(framework).strip()
-            # Provenance: 'primary' = source regulatory text, 'summary' = contributor-written
-            # paraphrase. Citations to a summary are not citations to the underlying clause,
-            # so reviewers must be able to tell the two apart.
-            if content_type and str(content_type).strip():
-                meta["content_type"] = str(content_type).strip().lower()
-            new_records.append(
-                {
-                    "id": cid,
-                    "text": piece,
-                    "metadata": meta,
-                }
-            )
-
-    if not new_records:
-        name = os.path.basename(file_path)
-        total_chars = sum(len((t or "").strip()) for t, _ in pages)
-        if total_chars == 0:
-            if ext == ".pdf":
-                raise ValueError(
-                    "No extractable text from this PDF (0 characters after stripping). "
-                    "The file may be scanned images only, encrypted, or corrupt; try OCR, "
-                    "another PDF export, or a text-based source."
-                )
-            raise ValueError(f"{name} contains no text (0 characters after stripping).")
-        # Text was extracted, but every chunk fell below the citable-content floor. Returning
-        # 0 here left the caller with an unchanged store and no reason for it — the CLI even
-        # exited 0. A document that indexes nothing is a failure, so it fails out loud.
-        raise ValueError(
-            f"{name}: extracted {total_chars} characters, but no chunk carries at least "
-            f"{MIN_CITABLE_WORDS} citable words or equivalent CJK text, so nothing was "
-            "indexed. This is usually a "
-            "table of contents, a cover page, or a scan whose text needs OCR."
+        existing = read_manifest(store_dir) if not reset else []
+        source_tag = _stable_source_id(file_path)
+        base_category = category or os.path.splitext(os.path.basename(file_path))[0]
+        jurisdiction_tag = (
+            normalize_jurisdiction(jurisdiction)
+            if jurisdiction and str(jurisdiction).strip()
+            else None
         )
 
-    model = load_sentence_transformer(embedding_model_name)
-    texts = [r["text"] for r in new_records]
-    embeddings = model.encode(texts, normalize_embeddings=True).tolist()
+        new_records: List[Dict[str, Any]] = []
+        ext = os.path.splitext(file_path)[1].lower()
+        pages = load_document_pages(file_path)
+        chunk_idx = 0
+        for page_text, page_num in pages:
+            headings = detect_headings(page_text)
+            for piece, offset in chunk_by_sections(page_text):
+                if not has_citable_content(piece):
+                    continue
+                cid = f"{source_tag}_p{page_num}_c{chunk_idx}"
+                chunk_idx += 1
+                meta: Dict[str, Any] = {
+                    "source": os.path.basename(file_path),
+                    "page": int(page_num),
+                    "category": base_category,
+                }
+                # Absent when the source has no detectable heading structure (e.g. PDF text
+                # extraction flattens layout). Omitted rather than guessed. A chunk that
+                # straddles a boundary lists every section it touches, joined by "; ",
+                # rather than claiming only the one it started in.
+                spanned = sections_for_span(headings, offset, offset + len(piece))
+                if spanned:
+                    meta["section"] = "; ".join(spanned)
+                if jurisdiction_tag:
+                    meta["jurisdiction"] = jurisdiction_tag
+                if document_id and str(document_id).strip():
+                    meta["document_id"] = str(document_id).strip()
+                if framework and str(framework).strip():
+                    meta["framework"] = str(framework).strip()
+                # Provenance: 'primary' = source regulatory text, 'summary' = contributor-written
+                # paraphrase. Citations to a summary are not citations to the underlying clause,
+                # so reviewers must be able to tell the two apart.
+                if content_type and str(content_type).strip():
+                    meta["content_type"] = str(content_type).strip().lower()
+                new_records.append(
+                    {
+                        "id": cid,
+                        "text": piece,
+                        "metadata": meta,
+                    }
+                )
 
-    collection = client.get_or_create_collection(
-        name=collection_name,
-        metadata={"hnsw:space": "cosine"},
-    )
-    collection.add(
-        ids=[r["id"] for r in new_records],
-        documents=texts,
-        embeddings=embeddings,
-        metadatas=[r["metadata"] for r in new_records],
-    )
+        if not new_records:
+            name = os.path.basename(file_path)
+            total_chars = sum(len((t or "").strip()) for t, _ in pages)
+            if total_chars == 0:
+                if ext == ".pdf":
+                    raise ValueError(
+                        "No extractable text from this PDF (0 characters after stripping). "
+                        "The file may be scanned images only, encrypted, or corrupt; try OCR, "
+                        "another PDF export, or a text-based source."
+                    )
+                raise ValueError(f"{name} contains no text (0 characters after stripping).")
+            # Text was extracted, but every chunk fell below the citable-content floor. Returning
+            # 0 here left the caller with an unchanged store and no reason for it — the CLI even
+            # exited 0. A document that indexes nothing is a failure, so it fails out loud.
+            raise ValueError(
+                f"{name}: extracted {total_chars} characters, but no chunk carries at least "
+                f"{MIN_CITABLE_WORDS} citable words or equivalent CJK text, so nothing was "
+                "indexed. This is usually a "
+                "table of contents, a cover page, or a scan whose text needs OCR."
+            )
 
-    merged = existing + new_records
-    write_manifest(store_dir, merged)
-    return len(new_records)
+        model = load_sentence_transformer(embedding_model_name)
+        texts = [r["text"] for r in new_records]
+        embeddings = model.encode(texts, normalize_embeddings=True).tolist()
+
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        collection.add(
+            ids=[r["id"] for r in new_records],
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=[r["metadata"] for r in new_records],
+        )
+
+        merged = existing + new_records
+        write_manifest(store_dir, merged)
+        return len(new_records)
+    finally:
+        # Explicitly release PersistentClient file handles so TemporaryDirectory
+        # cleanup succeeds on Windows (WinError 32 on chroma.sqlite3 / data_level0.bin).
+        try:
+            client.close()
+        except Exception:
+            pass

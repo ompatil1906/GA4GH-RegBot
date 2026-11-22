@@ -70,6 +70,12 @@ class RegBot:
             self._retriever = HybridRetriever(**kwargs)
         return self._retriever
 
+    def close(self) -> None:
+        """Release retriever and Chroma client resources."""
+        if self._retriever is not None:
+            self._retriever.close()
+            self._retriever = None
+
     def ingest_policy_documents(
         self,
         file_path: str,

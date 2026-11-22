@@ -34,6 +34,7 @@ class HybridRetriever:
         self.collection_name = collection_name
         self.embedding_model_name = embedding_model_name
         self._model: Any = None
+        self._client: Any = None
         self._collection: Any = None
         self._by_id: Dict[str, Dict[str, Any]] = {}
         self._bm25: Optional[BM25Okapi] = None
@@ -52,6 +53,7 @@ class HybridRetriever:
         import chromadb  # lazy: keeps lightweight imports working on odd Python combos
 
         client = chromadb.PersistentClient(path=chroma_path, settings=chromadb_settings())
+        self._client = client
         try:
             self._collection = client.get_collection(self.collection_name)
         except Exception:
@@ -116,6 +118,24 @@ class HybridRetriever:
     def is_ready(self) -> bool:
         self._ensure_loaded()
         return self._collection is not None and bool(self._by_id)
+
+    def close(self) -> None:
+        """Release Chroma PersistentClient resources.
+
+        Explicit close is required on Windows so that TemporaryDirectory cleanup
+        does not hit PermissionError (WinError 32) on chroma.sqlite3 or
+        data_level0.bin while the client still holds file handles.
+        """
+        client = self._client
+        self._client = None
+        self._collection = None
+        self._embeddings = None
+        self._embedding_ids = []
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def list_jurisdictions(self) -> List[str]:
         """Jurisdiction codes present in the store manifest."""
